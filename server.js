@@ -370,4 +370,10 @@ app.get('/api/admin/all-transactions', protect, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to compile tape." }); }
 });
 
-app.listen(PORT, () => console.log(`--- [CORE] SAAS ENGINE ACTIVE ON 127.0.0.1:${PORT} ---`));
+
+
+// The '0.0.0.0' is critical. It exposes the server to the public internet.
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`--- [CORE] SAAS ENGINE ACTIVE ON PORT ${PORT} ---`);
+    console.log(`--- [SYSTEM] SAAS VAULT ONLINE ---`);
+});
