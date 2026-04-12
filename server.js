@@ -17,7 +17,9 @@ const PORT = 8080;
 app.use(cors({
     origin: [
         "https://nn-fintech.com", // The Live Tanzanian Empire
-        "http://localhost:3000"   // Your local testing laptop
+        "https://www.nn-fintech.com", // The Live Tanzanian Empire (WWW)
+        "http://localhost:3000",   // Your local testing laptop
+        "https://nn-fintech-frontend-abwc51m5w-mrfriggins-projects.vercel.app"
     ],
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true
