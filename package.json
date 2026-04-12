@@ -1,0 +1,32 @@
+{
+    "name": "nn-fintech-enterprises-backend",
+    "version": "1.0.0",
+    "description": "Monorepo Backend for NN Fintech Enterprises",
+    "scripts": {
+        "install-all": "npm install --prefix services/identity-service && npm install --prefix services/ledger-service && npm install --prefix services/payment-service && npm install --prefix services/trading-service && npm install --prefix api-gateway",
+        "dev:identity": "cd services/identity-service && npm run dev",
+        "dev:ledger": "cd services/ledger-service && npm run dev",
+        "dev:payment": "cd services/payment-service && npm run dev",
+        "dev:trading": "cd services/trading-service && npm run dev",
+        "dev:gateway": "cd api-gateway && npm run dev",
+        "dev": "concurrently -n \"IDENTITY,LEDGER,PAYMENT,TRADING,GATEWAY\" -c \"bgBlue.bold,bgMagenta.bold,bgGreen.bold,bgYellow.bold,bgCyan.bold\" \"npm run dev:identity\" \"npm run dev:ledger\" \"npm run dev:payment\" \"npm run dev:trading\" \"npm run dev:gateway\""
+    },
+    "main": "server.js",
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "type": "commonjs",
+    "devDependencies": {
+        "concurrently": "^9.2.1"
+    },
+    "dependencies": {
+        "@paypal/payouts-sdk": "^1.1.1",
+        "bcryptjs": "^3.0.3",
+        "cors": "^2.8.6",
+        "dotenv": "^17.3.1",
+        "express": "^5.2.1",
+        "jsonwebtoken": "^9.0.3",
+        "mongoose": "^9.3.3",
+        "nodemailer": "^8.0.5"
+    }
+}
