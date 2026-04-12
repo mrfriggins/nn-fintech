@@ -22,6 +22,9 @@ app.use(cors({
 }));
 app.use(express.json());
 
+app.get('/', (req, res) => {
+  res.send('NN-FINTECH ENGINE: OPERATIONAL');
+});
 // ==========================================
 // --- 1. EMAIL TRANSMITTER (NODEMAILER) ---
 // ==========================================
