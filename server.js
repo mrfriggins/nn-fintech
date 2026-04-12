@@ -12,7 +12,14 @@ const JWT_SECRET = process.env.JWT_SECRET || "nn_fintech_billionaire_2026";
 const app = express();
 const PORT = 8080;
 // GLOBAL MIDDLEWARE MUST BE HERE
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({
+  origin: [
+    'https://nn-fintech.com', 
+    'https://www.nn-fintech.com', 
+    'http://localhost:3000'
+  ], 
+  credentials: true
+}));
 app.use(express.json());
 
 // ==========================================
