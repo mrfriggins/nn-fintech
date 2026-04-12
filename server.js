@@ -26,7 +26,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
-
+app.use(express.urlencoded({ extended: true }));
 app.get('/', (req, res) => {
   res.send('NN-FINTECH ENGINE: OPERATIONAL');
 });
@@ -138,12 +138,19 @@ const protect = async (req, res, next) => {
 // ==========================================
 // --- 5. AUTHENTICATION & OTP FIREWALL ---
 // ==========================================
+// --- AUTHORIZED ACCESS: REGISTRATION ---
 app.post('/auth/register', async (req, res) => {
     try {
-        // FORCE CLEAN THE INPUT
-        const email = req.body.email.trim().toLowerCase();
-        const password = req.body.password;
-        
+        // Safe access using Optional Chaining (?.) to prevent 'trim' crashes
+        const email = req.body?.email?.trim()?.toLowerCase();
+        const password = req.body?.password;
+        const fullName = req.body?.fullName;
+        const country = req.body?.country;
+
+        if (!email || !password) {
+            return res.status(400).json({ error: "Email and password are required for onboarding." });
+        }
+
         const existing = await User.findOne({ email });
         if (existing) return res.status(400).json({ error: "Email already exists in the system." });
 
@@ -155,11 +162,14 @@ app.post('/auth/register', async (req, res) => {
         const newUser = new User({ 
             email, 
             password: hashed, 
+            fullName,
+            country,
             otp: generatedOtp, 
             otpExpires: expirationTime 
         });
         await newUser.save();
 
+        // Dispatch Authorization Code
         await transporter.sendMail({
             from: `"NN-Fintech Vault" <${process.env.EMAIL_USER}>`,
             to: email,
@@ -174,11 +184,14 @@ app.post('/auth/register', async (req, res) => {
     }
 });
 
+// --- AUTHORIZED ACCESS: VERIFICATION ---
 app.post('/auth/verify', async (req, res) => {
     try {
-        // FORCE CLEAN THE INPUT
-        const email = req.body.email.trim().toLowerCase();
-        const otp = req.body.otp;
+        const email = req.body?.email?.trim()?.toLowerCase();
+        const otp = req.body?.otp;
+
+        if (!email || !otp) return res.status(400).json({ error: "Missing verification parameters." });
+
         const user = await User.findOne({ email });
         
         if (!user) return res.status(404).json({ error: "User not found." });
@@ -194,17 +207,30 @@ app.post('/auth/verify', async (req, res) => {
         await user.save();
 
         const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ message: "Account Verified. Logging in.", token, role: user.role, hasActiveSubscription: user.hasActiveSubscription });
-    } catch (err) { res.status(500).json({ error: "Verification failure." }); }
+        res.json({ 
+            message: "Account Verified. Logging in.", 
+            token, 
+            role: user.role, 
+            hasActiveSubscription: user.hasActiveSubscription 
+        });
+    } catch (err) { 
+        console.error("--- VERIFICATION CRASH LOG ---", err);
+        res.status(500).json({ error: "Verification failure." }); 
+    }
 });
 
+// --- AUTHORIZED ACCESS: LOGIN ---
 app.post('/auth/login', async (req, res) => {
     try {
-        // FORCE CLEAN THE INPUT
-        const identifier = req.body.identifier.trim().toLowerCase();
-        const password = req.body.password;
+        // SYNCED: Changed 'identifier' to 'email' to match your frontend state
+        const email = req.body?.email?.trim()?.toLowerCase();
+        const password = req.body?.password;
         
-        const user = await User.findOne({ email: identifier });
+        if (!email || !password) {
+            return res.status(400).json({ error: "Credentials missing." });
+        }
+
+        const user = await User.findOne({ email });
         
         if (!user || !(await bcrypt.compare(password, user.password))) {
             return res.status(400).json({ error: "Invalid Credentials." });
@@ -215,7 +241,11 @@ app.post('/auth/login', async (req, res) => {
         }
 
         const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token, role: user.role, hasActiveSubscription: user.hasActiveSubscription });
+        res.json({ 
+            token, 
+            role: user.role, 
+            hasActiveSubscription: user.hasActiveSubscription 
+        });
     } catch (err) { 
         console.error("--- LOGIN CRASH LOG ---", err);
         res.status(500).json({ error: "Server Error." }); 
