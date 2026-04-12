@@ -11,8 +11,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "nn_fintech_billionaire_2026";
 
 const app = express();
 const PORT = 8080;
-// GLOBAL MIDDLEWARE MUST BE HERE
-const cors = require("cors");
+
 
 // THE SECURITY WHITELIST
 app.use(cors({
