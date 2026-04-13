@@ -31,23 +31,39 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/', (req, res) => res.send('NN-FINTECH ENGINE: OPERATIONAL'));
 
 // ==========================================
-// --- 1. EMAIL TRANSMITTER ---
+// --- 1. EMAIL TRANSMITTER (HARDENED SMTP) ---
 // ==========================================
+// Explicitly forcing SMTP over secure port 465 to bypass firewall drops
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // true for 465, false for other ports
     auth: {
         user: process.env.EMAIL_USER, 
         pass: process.env.EMAIL_APP_PASSWORD 
-    },
-    tls: { rejectUnauthorized: false }
+    }
+});
+
+// STARTUP DIAGNOSTIC: Test Google connection immediately on boot
+console.log("--- INITIATING SMTP HANDSHAKE ---");
+transporter.verify(function(error, success) {
+    if (error) {
+        console.log("\n=======================================================");
+        console.log("❌ EMAIL SYSTEM OFFLINE: GOOGLE REJECTED CONNECTION");
+        console.log(`REASON: ${error.message}`);
+        console.log("FIX: You MUST use a 16-character Google 'App Password', NOT your normal Gmail password.");
+        console.log("=======================================================\n");
+    } else {
+        console.log("✅ EMAIL SYSTEM ONLINE: SMTP Handshake Successful.");
+    }
 });
 
 // ==========================================
 // --- 2. DATABASE & SCHEMA ---
 // ==========================================
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("--- [SYSTEM] SAAS VAULT ONLINE ---"))
-    .catch(err => { console.error("!!! DB FATAL ERROR !!! Check MONGO_URI in Render Env Vars.", err); });
+    .then(() => console.log("✅ SAAS VAULT ONLINE: Database Connected."))
+    .catch(err => { console.error("❌ DB FATAL ERROR:", err); });
 
 const userSchema = new mongoose.Schema({
     email: { type: String, unique: true, required: true },
@@ -123,7 +139,7 @@ const protect = async (req, res, next) => {
 };
 
 // ==========================================
-// --- 5. AUTHENTICATION (CRASH-PROOF) ---
+// --- 5. AUTHENTICATION (CRASH-PROOF & LOGGED) ---
 // ==========================================
 app.post('/auth/register', async (req, res) => {
     try {
@@ -134,12 +150,12 @@ app.post('/auth/register', async (req, res) => {
 
         if (!email || !password) return res.status(400).json({ error: "Email/Password required." });
         
-        // If they exist but aren't verified, let's delete the ghost account to let them try again
+        // Ghost Account Eraser
         const existing = await User.findOne({ email });
         if (existing) {
             if (!existing.isVerified) {
                 await User.deleteOne({ email });
-                console.log(`[AUTH] Cleared unverified ghost account for ${email}`);
+                console.log(`[AUTH] Ghost account wiped for ${email}. Re-registering.`);
             } else {
                 return res.status(400).json({ error: "Email already taken and verified." });
             }
@@ -148,33 +164,42 @@ app.post('/auth/register', async (req, res) => {
         const hashed = await bcrypt.hash(password, 10);
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        // --- THE BILLIONAIRE INTERCEPTOR ---
-        console.log(`\n=========================================`);
-        console.log(`[VAULT ACCESS] OTP GENERATED FOR ${email}`);
+        // INTERCEPTOR LOG: ALWAYS PRINT THE OTP
+        console.log(`\n=== OTP GENERATED FOR ${email} ===`);
         console.log(`>>>>> ${otp} <<<<<`);
-        console.log(`=========================================\n`);
+        console.log(`====================================\n`);
 
         const newUser = new User({ email, password: hashed, fullName, country, otp, otpExpires: new Date(Date.now() + 600000) });
         await newUser.save();
 
+        // ATTEMPT DISPATCH
+        let emailSent = false;
         try {
             if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
                 await transporter.sendMail({
                     from: `"NN-Fintech Vault" <${process.env.EMAIL_USER}>`,
-                    to: email, subject: "Access Code", text: `Your code: ${otp}`
+                    to: email, 
+                    subject: "Access Code: NN-Fintech", 
+                    text: `Your Vault Access Code is: ${otp}\n\nDo not share this code.`,
+                    html: `<h2>NN-Fintech Access</h2><p>Your Vault Access Code is: <strong>${otp}</strong></p><p>Do not share this code.</p>`
                 });
-                console.log(`[EMAIL] Dispatched to ${email}`);
+                console.log(`[DISPATCH] Email successfully sent to ${email}`);
+                emailSent = true;
             } else {
-                console.log(`[EMAIL] Bypassed: Missing Google App Credentials in Render.`);
+                console.log(`[DISPATCH ABORTED] Missing Google Credentials in Render ENV.`);
             }
         } catch (e) { 
-            console.error("[EMAIL] Nodemailer failed. Check Google App Passwords.", e); 
+            console.error(`[DISPATCH FAILED] Google rejected the send attempt. Reason:`, e.message); 
         }
         
-        // Send the success response regardless of email failure
-        res.status(201).json({ message: "Code generated. Check email or server logs." });
+        // Send success to frontend so UI switches to OTP input, regardless of email success
+        res.status(201).json({ 
+            message: "Registration recorded.", 
+            emailDispatched: emailSent 
+        });
+
     } catch (err) { 
-        console.error("[DB FATAL] Registration crashed during save:", err);
+        console.error("[DB FATAL] Registration save crashed:", err);
         res.status(500).json({ error: "Database rejection. Check logs." }); 
     }
 });
