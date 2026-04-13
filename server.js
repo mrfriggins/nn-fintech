@@ -31,28 +31,23 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/', (req, res) => res.send('NN-FINTECH ENGINE: OPERATIONAL'));
 
 // ==========================================
-// --- 1. EMAIL TRANSMITTER (HARDENED SMTP) ---
+// --- 1. EMAIL TRANSMITTER (IPv4 HARDENED) ---
 // ==========================================
-// Explicitly forcing SMTP over secure port 465 to bypass firewall drops
 const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
     port: 465,
-    secure: true, // true for 465, false for other ports
+    secure: true,
+    family: 4, // Forces IPv4 to bypass Render's IPv6 block
     auth: {
         user: process.env.EMAIL_USER, 
         pass: process.env.EMAIL_APP_PASSWORD 
     }
 });
 
-// STARTUP DIAGNOSTIC: Test Google connection immediately on boot
 console.log("--- INITIATING SMTP HANDSHAKE ---");
 transporter.verify(function(error, success) {
     if (error) {
-        console.log("\n=======================================================");
-        console.log("❌ EMAIL SYSTEM OFFLINE: GOOGLE REJECTED CONNECTION");
-        console.log(`REASON: ${error.message}`);
-        console.log("FIX: You MUST use a 16-character Google 'App Password', NOT your normal Gmail password.");
-        console.log("=======================================================\n");
+        console.log("❌ EMAIL SYSTEM OFFLINE:", error.message);
     } else {
         console.log("✅ EMAIL SYSTEM ONLINE: SMTP Handshake Successful.");
     }
@@ -113,7 +108,6 @@ const syncPolygonData = async () => {
 };
 setInterval(syncPolygonData, 60000);
 
-// LIVE PRICE SIMULATOR
 setInterval(() => {
     stocks = stocks.map(s => {
         const movement = s.anchorPrice * (Math.random() * s.volatility * 2 - s.volatility);
@@ -139,7 +133,7 @@ const protect = async (req, res, next) => {
 };
 
 // ==========================================
-// --- 5. AUTHENTICATION (CRASH-PROOF & LOGGED) ---
+// --- 5. AUTHENTICATION CONTROLLER ---
 // ==========================================
 app.post('/auth/register', async (req, res) => {
     try {
@@ -150,7 +144,6 @@ app.post('/auth/register', async (req, res) => {
 
         if (!email || !password) return res.status(400).json({ error: "Email/Password required." });
         
-        // Ghost Account Eraser
         const existing = await User.findOne({ email });
         if (existing) {
             if (!existing.isVerified) {
@@ -164,15 +157,21 @@ app.post('/auth/register', async (req, res) => {
         const hashed = await bcrypt.hash(password, 10);
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        // INTERCEPTOR LOG: ALWAYS PRINT THE OTP
         console.log(`\n=== OTP GENERATED FOR ${email} ===`);
         console.log(`>>>>> ${otp} <<<<<`);
         console.log(`====================================\n`);
 
         const newUser = new User({ email, password: hashed, fullName, country, otp, otpExpires: new Date(Date.now() + 600000) });
-        await newUser.save();
+        
+        try {
+            await newUser.save();
+        } catch (saveErr) {
+            if (saveErr.code === 11000) {
+                return res.status(400).json({ error: "Registration already processing for this email." });
+            }
+            throw saveErr; 
+        }
 
-        // ATTEMPT DISPATCH
         let emailSent = false;
         try {
             if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
@@ -185,14 +184,11 @@ app.post('/auth/register', async (req, res) => {
                 });
                 console.log(`[DISPATCH] Email successfully sent to ${email}`);
                 emailSent = true;
-            } else {
-                console.log(`[DISPATCH ABORTED] Missing Google Credentials in Render ENV.`);
             }
         } catch (e) { 
-            console.error(`[DISPATCH FAILED] Google rejected the send attempt. Reason:`, e.message); 
+            console.error(`[DISPATCH FAILED] Reason:`, e.message); 
         }
         
-        // Send success to frontend so UI switches to OTP input, regardless of email success
         res.status(201).json({ 
             message: "Registration recorded.", 
             emailDispatched: emailSent 
@@ -324,7 +320,6 @@ app.get('/api/users/profile', protect, (req, res) => {
     res.json({ email: req.user.email, hasActiveSubscription: req.user.hasActiveSubscription, demoBalance: req.user.demoBalance, b2bKeys: req.user.b2bKeys, role: req.user.role });
 });
 
-// EXECUTE
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`--- [CORE] ENGINE RUNNING ON PORT ${PORT} ---`);
 });
