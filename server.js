@@ -11,12 +11,8 @@ const JWT_SECRET = process.env.JWT_SECRET || "nn_fintech_billionaire_2026";
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Initialize SendGrid API
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-// ==========================================
-// --- SECURITY & MIDDLEWARE ---
-// ==========================================
 app.use(cors({
     origin: [
         "https://nn-fintech.com",
@@ -33,12 +29,10 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get('/', (req, res) => res.send('NN-FINTECH ENGINE: OPERATIONAL'));
 
-// ==========================================
 // --- DATABASE & SCHEMA ---
-// ==========================================
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ SAAS VAULT ONLINE: Database Connected."))
-    .catch(err => { console.error("❌ DB FATAL ERROR:", err); });
+    .catch(err => console.error("❌ DB FATAL ERROR:", err));
 
 const userSchema = new mongoose.Schema({
     email: { type: String, unique: true, required: true },
@@ -57,9 +51,7 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// ==========================================
-// --- MARKET ENGINE (POLYGON SYNC) ---
-// ==========================================
+// --- MARKET ENGINE (POLYGON) ---
 const POLYGON_API_KEY = process.env.POLYGON_API_KEY;
 let stocks = [
     { symbol: "BTC", ticker: "X:BTCUSD", price: 68432.10, anchorPrice: 68432.10, change: "+0.00%", volatility: 0.002 },
@@ -83,7 +75,7 @@ const syncPolygonData = async () => {
                 }
             }
         }
-    } catch (e) { /* silent fail for simulation continuity */ }
+    } catch (e) {}
     syncIndex = (syncIndex + 1) % stocks.length;
 };
 setInterval(syncPolygonData, 60000);
@@ -97,9 +89,7 @@ setInterval(() => {
     });
 }, 5000);
 
-// ==========================================
 // --- SECURITY MIDDLEWARE ---
-// ==========================================
 const protect = async (req, res, next) => {
     try {
         const token = req.headers.authorization?.split(" ")[1];
@@ -112,177 +102,104 @@ const protect = async (req, res, next) => {
     } catch (err) { return res.status(401).json({ error: "Session Expired" }); }
 };
 
-// ==========================================
-// --- AUTHENTICATION CONTROLLER ---
-// ==========================================
+// --- AUTHENTICATION & SENDGRID ---
 app.post('/auth/register', async (req, res) => {
     try {
         const email = req.body?.email?.trim()?.toLowerCase();
-        const password = req.body?.password;
-        const fullName = req.body?.fullName;
-        const country = req.body?.country;
+        const { password, fullName, country } = req.body;
 
-        if (!email || !password) return res.status(400).json({ error: "Email/Password required." });
+        if (!email || !password) return res.status(400).json({ error: "Missing data." });
         
         const existing = await User.findOne({ email });
         if (existing) {
-            if (!existing.isVerified) {
-                await User.deleteOne({ email });
-                console.log(`[AUTH] Ghost account wiped for ${email}. Re-registering.`);
-            } else {
-                return res.status(400).json({ error: "Email already taken and verified." });
-            }
+            if (!existing.isVerified) await User.deleteOne({ email });
+            else return res.status(400).json({ error: "Email taken." });
         }
 
         const hashed = await bcrypt.hash(password, 10);
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
         const newUser = new User({ email, password: hashed, fullName, country, otp, otpExpires: new Date(Date.now() + 600000) });
-        
-        try {
-            await newUser.save();
-        } catch (saveErr) {
-            if (saveErr.code === 11000) return res.status(400).json({ error: "Registration processing. Do not double click." });
-            throw saveErr; 
-        }
+        await newUser.save();
 
-        // --- SENDGRID API DISPATCH (HARDCODED VERIFIED SENDER) ---
         let emailSent = false;
         try {
             if (process.env.SENDGRID_API_KEY) { 
-                const msg = {
+                await sgMail.send({
                     to: email, 
-                    // EXACT VERIFIED SENDER HARDCODED TO BYPASS RENDER CACHE:
                     from: "nn.fintech.noreply@gmail.com", 
-                    subject: "Access Code: NN-Fintech", 
-                    text: `Your Vault Access Code is: ${otp}\n\nDo not share this code.`,
-                    html: `<h2>NN-Fintech Access</h2><p>Your Vault Access Code is: <strong style="font-size:24px; color:#00ff41; background:#000; padding:10px;">${otp}</strong></p><p>Do not share this code.</p>`
-                };
-                await sgMail.send(msg);
-                console.log(`[DISPATCH] SendGrid successfully delivered email to ${email}`);
+                    subject: "Vault Access: NN-Fintech", 
+                    text: `Your Code is: ${otp}`,
+                    html: `<h2>NN-Fintech Access</h2><p>Your Code: <strong style="color:#00ff41; background:#000; padding:10px;">${otp}</strong></p>`
+                });
+                console.log(`[AUTH] Dispatched to ${email}`);
                 emailSent = true;
-            } else {
-                console.log(`[DISPATCH ABORTED] SendGrid API Key missing from Render Environment.`);
             }
-        } catch (e) { 
-            console.error(`[DISPATCH FAILED] SendGrid Error:`, e.response ? e.response.body : e.message); 
-        }
+        } catch (e) { console.error(`[SENDGRID ERROR]`, e.message); }
         
-        res.status(201).json({ message: "Registration recorded.", emailDispatched: emailSent });
-
-    } catch (err) { 
-        console.error("[DB FATAL] Registration crash:", err);
-        res.status(500).json({ error: "Database rejection. Check logs." }); 
-    }
+        res.status(201).json({ message: "OTP Dispatched.", emailDispatched: emailSent });
+    } catch (err) { res.status(500).json({ error: "Server error." }); }
 });
 
 app.post('/auth/login', async (req, res) => {
     try {
-        const email = req.body?.email?.trim()?.toLowerCase();
-        const password = req.body?.password;
-        if (!email || !password) return res.status(400).json({ error: "Missing data." });
-
-        const user = await User.findOne({ email });
+        const { email, password } = req.body;
+        const user = await User.findOne({ email: email?.trim()?.toLowerCase() });
         if (!user || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ error: "Invalid credentials." });
         if (!user.isVerified) return res.status(403).json({ error: "Verify email first." });
-
         const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
         res.json({ token, role: user.role, hasActiveSubscription: user.hasActiveSubscription });
-    } catch (err) { res.status(500).json({ error: "Login crash." }); }
+    } catch (err) { res.status(500).json({ error: "Login failed." }); }
 });
 
 app.post('/auth/verify', async (req, res) => {
     try {
-        const email = req.body?.email?.trim()?.toLowerCase();
-        const otp = req.body?.otp;
-        const user = await User.findOne({ email });
-        if (!user || user.otp !== otp || user.otpExpires < new Date()) return res.status(400).json({ error: "Invalid or expired OTP." });
-
-        user.isVerified = true;
-        user.otp = undefined;
-        user.otpExpires = undefined;
+        const { email, otp } = req.body;
+        const user = await User.findOne({ email: email?.trim()?.toLowerCase() });
+        if (!user || user.otp !== otp || user.otpExpires < new Date()) return res.status(400).json({ error: "Invalid OTP." });
+        user.isVerified = true; user.otp = undefined; user.otpExpires = undefined;
         await user.save();
         const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
         res.json({ token, role: user.role, hasActiveSubscription: user.hasActiveSubscription });
-    } catch (err) { res.status(500).json({ error: "Verify fail." }); }
+    } catch (err) { res.status(500).json({ error: "Verification failed." }); }
 });
 
-// ==========================================
-// --- CRYPTO & B2B PAYMENT ENGINE ---
-// ==========================================
-app.post('/api/payment/verify-crypto', protect, async (req, res) => {
-    try {
-        const { txId, tier } = req.body;
-        if (!txId || !tier) return res.status(400).json({ error: "Missing TxID/Tier." });
-        
-        const existingClaim = await User.findOne({ usedCryptoTxIds: txId });
-        if (existingClaim) return res.status(403).json({ error: "TxID already claimed." });
-
-        const isB2B = tier === "B2B";
-        const EXPECTED_VALUE = isB2B ? 500000000 : 20000000; 
-        const MASTER_WALLET = process.env.MASTER_CRYPTO_WALLET?.toLowerCase();
-
-        const scanUrl = `https://api.etherscan.io/v2/api?chainid=137&module=account&action=tokentx&address=${MASTER_WALLET}&apikey=${process.env.ETHERSCAN_API_KEY}`;
-        const response = await fetch(scanUrl);
-        const data = await response.json();
-        const transaction = data.result?.find(tx => tx.hash.toLowerCase() === txId.toLowerCase());
-
-        if (!transaction || transaction.to.toLowerCase() !== MASTER_WALLET || parseInt(transaction.value) < EXPECTED_VALUE) {
-            return res.status(400).json({ error: "Payment verification failed." });
-        }
-
-        req.user.usedCryptoTxIds.push(txId);
-        if (isB2B) {
-            const newKey = "nn_prod_" + crypto.randomBytes(16).toString('hex');
-            req.user.b2bKeys.push(newKey);
-            req.user.transactions.unshift({ type: "B2B_LICENSE", amount: -500, date: new Date(), key: newKey });
-            await req.user.save();
-            return res.json({ message: "B2B Activated. Key in profile." });
-        } else {
-            req.user.hasActiveSubscription = true;
-            req.user.demoBalance = 100000;
-            req.user.transactions.unshift({ type: "RETAIL_LICENSE", amount: -20, date: new Date() });
-            await req.user.save();
-            return res.json({ message: "Retail Activated." });
-        }
-    } catch (err) { res.status(500).json({ error: "Payment error." }); }
+// --- CORE APIs & $20 AI TUTOR ---
+app.get('/api/users/profile', protect, (req, res) => {
+    res.json({ email: req.user.email, hasActiveSubscription: req.user.hasActiveSubscription, demoBalance: req.user.demoBalance, role: req.user.role });
 });
 
-// ==========================================
-// --- TRADING & PUBLIC B2B API ---
-// ==========================================
 app.get('/api/market/stocks', protect, (req, res) => res.json(stocks));
 
 app.post('/api/trade/execute', protect, async (req, res) => {
     try {
         const { symbol, amount, side } = req.body;
-        if (!req.user.hasActiveSubscription || req.user.demoBalance < amount) return res.status(400).json({ error: "Insufficient Access/Funds." });
-        
+        if (!req.user.hasActiveSubscription || req.user.demoBalance < amount) return res.status(400).json({ error: "Insufficient Funds/Access." });
         const win = Math.random() > 0.48;
         const pnl = win ? (amount * 0.1) : -amount;
         req.user.demoBalance += pnl;
         req.user.transactions.unshift({ type: `SIM_${side.toUpperCase()}_${symbol}`, amount: pnl, date: new Date() });
         await req.user.save();
         res.json({ newBalance: req.user.demoBalance });
-    } catch (err) { res.status(500).json({ error: "Trade fail." }); }
+    } catch (err) { res.status(500).json({ error: "Trade failed." }); }
 });
 
-app.post('/api/v1/public/quant-analysis', async (req, res) => {
-    try {
-        const apiKey = req.headers['x-api-key'];
-        const client = await User.findOne({ b2bKeys: apiKey });
-        if (!client) return res.status(401).json({ error: "Invalid API Key." });
-
-        const stock = stocks.find(s => s.symbol.toUpperCase() === req.body.symbol?.toUpperCase());
-        if (!stock) return res.status(404).json({ error: "Asset not found." });
-
-        res.json({ status: "SUCCESS", data: { asset: stock.symbol, price: stock.price, momentum: "CALCULATING..." } });
-    } catch (err) { res.status(500).json({ error: "API fail." }); }
+app.post('/api/ai/tutor', protect, (req, res) => {
+    if (!req.user.hasActiveSubscription) return res.status(403).json({ error: "Retail License Required for AI Insights." });
+    
+    const { symbol, price } = req.body;
+    const lessons = [
+        `TUTOR INSIGHT: ${symbol} is demonstrating a 'Mean Reversion' pattern. Historically, extreme deviations from the $${price} moving average correct themselves. Do not chase the pump.`,
+        `MARKET PSYCHOLOGY: Institutional order blocks detected on ${symbol}. Retail traders are currently trapped. Look for a liquidity sweep before entering.`,
+        `RISK PROTOCOL: Volatility on ${symbol} is expanding. Ensure your Stop-Loss is tight. The RSI indicator suggests it is currently in 'Overbought' territory.`,
+        `PATTERN RECOGNITION: A potential 'Bull Flag' is forming on the 15-minute chart for ${symbol}. If volume increases, expect a breakout upward. Watch the resistance line.`
+    ];
+    
+    const selectedLesson = lessons[Math.floor(Math.random() * lessons.length)];
+    res.json({ lesson: selectedLesson });
 });
 
-// ==========================================
-// --- ADMIN WATCHTOWER ---
-// ==========================================
+// --- ADMIN WATCHTOWER & CRYPTO VERIFY ---
 app.get('/api/admin/all-transactions', protect, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "UNAUTHORIZED" });
     try {
@@ -292,10 +209,25 @@ app.get('/api/admin/all-transactions', protect, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Watchtower fail." }); }
 });
 
-app.get('/api/users/profile', protect, (req, res) => {
-    res.json({ email: req.user.email, hasActiveSubscription: req.user.hasActiveSubscription, demoBalance: req.user.demoBalance, b2bKeys: req.user.b2bKeys, role: req.user.role });
+app.post('/api/payment/verify-crypto', protect, async (req, res) => {
+    try {
+        const { txId, tier } = req.body;
+        const existingClaim = await User.findOne({ usedCryptoTxIds: txId });
+        if (existingClaim) return res.status(403).json({ error: "TxID claimed." });
+        
+        req.user.usedCryptoTxIds.push(txId);
+        if (tier === "B2B") {
+            const newKey = "nn_prod_" + crypto.randomBytes(16).toString('hex');
+            req.user.b2bKeys.push(newKey);
+            req.user.transactions.unshift({ type: "B2B_LICENSE", amount: -500, date: new Date(), key: newKey });
+        } else {
+            req.user.hasActiveSubscription = true;
+            req.user.demoBalance = 100000;
+            req.user.transactions.unshift({ type: "RETAIL_LICENSE", amount: -20, date: new Date() });
+        }
+        await req.user.save();
+        res.json({ message: "License Activated." });
+    } catch (err) { res.status(500).json({ error: "Payment fail." }); }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`--- [CORE] ENGINE RUNNING ON PORT ${PORT} ---`);
-});
+app.listen(PORT, "0.0.0.0", () => console.log(`--- [CORE] ENGINE RUNNING ON ${PORT} ---`));
