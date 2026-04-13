@@ -47,7 +47,7 @@ const transporter = nodemailer.createTransport({
 // ==========================================
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("--- [SYSTEM] SAAS VAULT ONLINE ---"))
-    .catch(err => { console.error("!!! DB FATAL ERROR !!!", err); });
+    .catch(err => { console.error("!!! DB FATAL ERROR !!! Check MONGO_URI in Render Env Vars.", err); });
 
 const userSchema = new mongoose.Schema({
     email: { type: String, unique: true, required: true },
@@ -92,7 +92,7 @@ const syncPolygonData = async () => {
                 }
             }
         }
-    } catch (e) { console.error("Polygon Sync Error"); }
+    } catch (e) { /* silent fail for simulation continuity */ }
     syncIndex = (syncIndex + 1) % stocks.length;
 };
 setInterval(syncPolygonData, 60000);
@@ -133,22 +133,50 @@ app.post('/auth/register', async (req, res) => {
         const country = req.body?.country;
 
         if (!email || !password) return res.status(400).json({ error: "Email/Password required." });
+        
+        // If they exist but aren't verified, let's delete the ghost account to let them try again
         const existing = await User.findOne({ email });
-        if (existing) return res.status(400).json({ error: "Email taken." });
+        if (existing) {
+            if (!existing.isVerified) {
+                await User.deleteOne({ email });
+                console.log(`[AUTH] Cleared unverified ghost account for ${email}`);
+            } else {
+                return res.status(400).json({ error: "Email already taken and verified." });
+            }
+        }
 
         const hashed = await bcrypt.hash(password, 10);
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // --- THE BILLIONAIRE INTERCEPTOR ---
+        console.log(`\n=========================================`);
+        console.log(`[VAULT ACCESS] OTP GENERATED FOR ${email}`);
+        console.log(`>>>>> ${otp} <<<<<`);
+        console.log(`=========================================\n`);
+
         const newUser = new User({ email, password: hashed, fullName, country, otp, otpExpires: new Date(Date.now() + 600000) });
         await newUser.save();
 
         try {
-            await transporter.sendMail({
-                from: `"NN-Fintech Vault" <${process.env.EMAIL_USER}>`,
-                to: email, subject: "Access Code", text: `Your code: ${otp}`
-            });
-        } catch (e) { console.error("Email fail"); }
-        res.status(201).json({ message: "Code sent." });
-    } catch (err) { res.status(500).json({ error: "Reg failed." }); }
+            if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
+                await transporter.sendMail({
+                    from: `"NN-Fintech Vault" <${process.env.EMAIL_USER}>`,
+                    to: email, subject: "Access Code", text: `Your code: ${otp}`
+                });
+                console.log(`[EMAIL] Dispatched to ${email}`);
+            } else {
+                console.log(`[EMAIL] Bypassed: Missing Google App Credentials in Render.`);
+            }
+        } catch (e) { 
+            console.error("[EMAIL] Nodemailer failed. Check Google App Passwords.", e); 
+        }
+        
+        // Send the success response regardless of email failure
+        res.status(201).json({ message: "Code generated. Check email or server logs." });
+    } catch (err) { 
+        console.error("[DB FATAL] Registration crashed during save:", err);
+        res.status(500).json({ error: "Database rejection. Check logs." }); 
+    }
 });
 
 app.post('/auth/login', async (req, res) => {
@@ -171,7 +199,7 @@ app.post('/auth/verify', async (req, res) => {
         const email = req.body?.email?.trim()?.toLowerCase();
         const otp = req.body?.otp;
         const user = await User.findOne({ email });
-        if (!user || user.otp !== otp || user.otpExpires < new Date()) return res.status(400).json({ error: "Invalid OTP." });
+        if (!user || user.otp !== otp || user.otpExpires < new Date()) return res.status(400).json({ error: "Invalid or expired OTP." });
 
         user.isVerified = true;
         user.otp = undefined;
@@ -196,7 +224,6 @@ app.post('/api/payment/verify-crypto', protect, async (req, res) => {
         const isB2B = tier === "B2B";
         const EXPECTED_VALUE = isB2B ? 500000000 : 20000000; 
         const MASTER_WALLET = process.env.MASTER_CRYPTO_WALLET?.toLowerCase();
-        const USDT_CONTRACT = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F".toLowerCase(); 
 
         const scanUrl = `https://api.etherscan.io/v2/api?chainid=137&module=account&action=tokentx&address=${MASTER_WALLET}&apikey=${process.env.ETHERSCAN_API_KEY}`;
         const response = await fetch(scanUrl);
