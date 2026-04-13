@@ -51,7 +51,7 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// --- MARKET ENGINE (POLYGON) ---
+// --- MARKET ENGINE ---
 const POLYGON_API_KEY = process.env.POLYGON_API_KEY;
 let stocks = [
     { symbol: "BTC", ticker: "X:BTCUSD", price: 68432.10, anchorPrice: 68432.10, change: "+0.00%", volatility: 0.002 },
@@ -102,7 +102,7 @@ const protect = async (req, res, next) => {
     } catch (err) { return res.status(401).json({ error: "Session Expired" }); }
 };
 
-// --- AUTHENTICATION & SENDGRID ---
+// --- AUTHENTICATION ---
 app.post('/auth/register', async (req, res) => {
     try {
         const email = req.body?.email?.trim()?.toLowerCase();
@@ -132,10 +132,9 @@ app.post('/auth/register', async (req, res) => {
                     text: `Your Code is: ${otp}`,
                     html: `<h2>NN-Fintech Access</h2><p>Your Code: <strong style="color:#00ff41; background:#000; padding:10px;">${otp}</strong></p>`
                 });
-                console.log(`[AUTH] Dispatched to ${email}`);
                 emailSent = true;
             }
-        } catch (e) { console.error(`[SENDGRID ERROR]`, e.message); }
+        } catch (e) {}
         
         res.status(201).json({ message: "OTP Dispatched.", emailDispatched: emailSent });
     } catch (err) { res.status(500).json({ error: "Server error." }); }
@@ -164,7 +163,7 @@ app.post('/auth/verify', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Verification failed." }); }
 });
 
-// --- CORE APIs & $20 AI TUTOR ---
+// --- CORE APIs ---
 app.get('/api/users/profile', protect, (req, res) => {
     res.json({ email: req.user.email, hasActiveSubscription: req.user.hasActiveSubscription, demoBalance: req.user.demoBalance, role: req.user.role });
 });
@@ -184,22 +183,30 @@ app.post('/api/trade/execute', protect, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Trade failed." }); }
 });
 
+// --- RETAIL ACADEMY TUTOR (REPLACES QUANT AI) ---
 app.post('/api/ai/tutor', protect, (req, res) => {
-    if (!req.user.hasActiveSubscription) return res.status(403).json({ error: "Retail License Required for AI Insights." });
+    if (!req.user.hasActiveSubscription) return res.status(403).json({ error: "Retail License Required for Academy Insights." });
     
-    const { symbol, price } = req.body;
+    const { symbol } = req.body;
     const lessons = [
-        `TUTOR INSIGHT: ${symbol} is demonstrating a 'Mean Reversion' pattern. Historically, extreme deviations from the $${price} moving average correct themselves. Do not chase the pump.`,
-        `MARKET PSYCHOLOGY: Institutional order blocks detected on ${symbol}. Retail traders are currently trapped. Look for a liquidity sweep before entering.`,
-        `RISK PROTOCOL: Volatility on ${symbol} is expanding. Ensure your Stop-Loss is tight. The RSI indicator suggests it is currently in 'Overbought' territory.`,
-        `PATTERN RECOGNITION: A potential 'Bull Flag' is forming on the 15-minute chart for ${symbol}. If volume increases, expect a breakout upward. Watch the resistance line.`
+        `ACADEMY LESSON: What drives ${symbol}? Prices move based on Supply and Demand. When more buyers enter the market than sellers, the price goes up. Watch how the price reacts to news events.`,
+        `RISK MANAGEMENT: Never risk your entire account on a single ${symbol} trade. Professional traders usually risk no more than 1% to 2% of their total balance per position.`,
+        `TRADING PSYCHOLOGY: The market is driven by Fear and Greed. If you feel panicked watching ${symbol} drop, your position size is too big. Reduce your exposure.`,
+        `MECHANICS: A "LONG" position means you buy ${symbol} hoping the price goes up. A "SHORT" position means you are betting against ${symbol}, making profit if the price falls.`,
+        `TOOLSET: Always set a mental "Stop-Loss". This is the exact price where you admit your trade on ${symbol} was wrong and you close it to prevent a massive loss.`
     ];
     
     const selectedLesson = lessons[Math.floor(Math.random() * lessons.length)];
     res.json({ lesson: selectedLesson });
 });
 
-// --- ADMIN WATCHTOWER & CRYPTO VERIFY ---
+// --- ADMIN WATCHTOWER ---
+app.post('/api/admin/force-upgrade', protect, async (req, res) => {
+    req.user.role = 'admin';
+    await req.user.save();
+    res.json({ message: "Admin Rights Granted." });
+});
+
 app.get('/api/admin/all-transactions', protect, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "UNAUTHORIZED" });
     try {
