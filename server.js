@@ -3,13 +3,16 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const nodemailer = require('nodemailer');
+const sgMail = require('@sendgrid/mail'); // <-- REPLACED NODEMAILER
 const crypto = require('crypto');
 require('dotenv').config();
 
 const JWT_SECRET = process.env.JWT_SECRET || "nn_fintech_billionaire_2026";
 const app = express();
 const PORT = process.env.PORT || 8080;
+
+// Initialize SendGrid API
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // ==========================================
 // --- SECURITY & MIDDLEWARE ---
@@ -31,30 +34,7 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/', (req, res) => res.send('NN-FINTECH ENGINE: OPERATIONAL'));
 
 // ==========================================
-// --- 1. EMAIL TRANSMITTER (IPv4 HARDENED) ---
-// ==========================================
-const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true,
-    family: 4, // Forces IPv4 to bypass Render's IPv6 block
-    auth: {
-        user: process.env.EMAIL_USER, 
-        pass: process.env.EMAIL_APP_PASSWORD 
-    }
-});
-
-console.log("--- INITIATING SMTP HANDSHAKE ---");
-transporter.verify(function(error, success) {
-    if (error) {
-        console.log("❌ EMAIL SYSTEM OFFLINE:", error.message);
-    } else {
-        console.log("✅ EMAIL SYSTEM ONLINE: SMTP Handshake Successful.");
-    }
-});
-
-// ==========================================
-// --- 2. DATABASE & SCHEMA ---
+// --- DATABASE & SCHEMA ---
 // ==========================================
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ SAAS VAULT ONLINE: Database Connected."))
@@ -78,7 +58,7 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 // ==========================================
-// --- 3. MARKET ENGINE (POLYGON SYNC) ---
+// --- MARKET ENGINE (POLYGON SYNC) ---
 // ==========================================
 const POLYGON_API_KEY = process.env.POLYGON_API_KEY;
 let stocks = [
@@ -118,7 +98,7 @@ setInterval(() => {
 }, 5000);
 
 // ==========================================
-// --- 4. SECURITY MIDDLEWARE ---
+// --- SECURITY MIDDLEWARE ---
 // ==========================================
 const protect = async (req, res, next) => {
     try {
@@ -133,7 +113,7 @@ const protect = async (req, res, next) => {
 };
 
 // ==========================================
-// --- 5. AUTHENTICATION CONTROLLER ---
+// --- AUTHENTICATION CONTROLLER ---
 // ==========================================
 app.post('/auth/register', async (req, res) => {
     try {
@@ -157,45 +137,39 @@ app.post('/auth/register', async (req, res) => {
         const hashed = await bcrypt.hash(password, 10);
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        console.log(`\n=== OTP GENERATED FOR ${email} ===`);
-        console.log(`>>>>> ${otp} <<<<<`);
-        console.log(`====================================\n`);
-
         const newUser = new User({ email, password: hashed, fullName, country, otp, otpExpires: new Date(Date.now() + 600000) });
         
         try {
             await newUser.save();
         } catch (saveErr) {
-            if (saveErr.code === 11000) {
-                return res.status(400).json({ error: "Registration already processing for this email." });
-            }
+            if (saveErr.code === 11000) return res.status(400).json({ error: "Registration processing. Do not double click." });
             throw saveErr; 
         }
 
+        // --- SENDGRID API DISPATCH ---
         let emailSent = false;
         try {
-            if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
-                await transporter.sendMail({
-                    from: `"NN-Fintech Vault" <${process.env.EMAIL_USER}>`,
+            if (process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL) {
+                const msg = {
                     to: email, 
+                    from: process.env.SENDGRID_FROM_EMAIL,
                     subject: "Access Code: NN-Fintech", 
                     text: `Your Vault Access Code is: ${otp}\n\nDo not share this code.`,
-                    html: `<h2>NN-Fintech Access</h2><p>Your Vault Access Code is: <strong>${otp}</strong></p><p>Do not share this code.</p>`
-                });
-                console.log(`[DISPATCH] Email successfully sent to ${email}`);
+                    html: `<h2>NN-Fintech Access</h2><p>Your Vault Access Code is: <strong style="font-size:24px; color:#00ff41; background:#000; padding:10px;">${otp}</strong></p><p>Do not share this code.</p>`
+                };
+                await sgMail.send(msg);
+                console.log(`[DISPATCH] SendGrid successfully delivered email to ${email}`);
                 emailSent = true;
+            } else {
+                console.log(`[DISPATCH ABORTED] SendGrid Environment Variables missing.`);
             }
         } catch (e) { 
-            console.error(`[DISPATCH FAILED] Reason:`, e.message); 
+            console.error(`[DISPATCH FAILED] SendGrid Error:`, e.response ? e.response.body : e.message); 
         }
         
-        res.status(201).json({ 
-            message: "Registration recorded.", 
-            emailDispatched: emailSent 
-        });
+        res.status(201).json({ message: "Registration recorded.", emailDispatched: emailSent });
 
     } catch (err) { 
-        console.error("[DB FATAL] Registration save crashed:", err);
         res.status(500).json({ error: "Database rejection. Check logs." }); 
     }
 });
@@ -232,7 +206,7 @@ app.post('/auth/verify', async (req, res) => {
 });
 
 // ==========================================
-// --- 6. CRYPTO & B2B PAYMENT ENGINE ---
+// --- CRYPTO & B2B PAYMENT ENGINE ---
 // ==========================================
 app.post('/api/payment/verify-crypto', protect, async (req, res) => {
     try {
@@ -273,7 +247,7 @@ app.post('/api/payment/verify-crypto', protect, async (req, res) => {
 });
 
 // ==========================================
-// --- 7. TRADING & PUBLIC B2B API ---
+// --- TRADING & PUBLIC B2B API ---
 // ==========================================
 app.get('/api/market/stocks', protect, (req, res) => res.json(stocks));
 
@@ -305,7 +279,7 @@ app.post('/api/v1/public/quant-analysis', async (req, res) => {
 });
 
 // ==========================================
-// --- 8. ADMIN WATCHTOWER ---
+// --- ADMIN WATCHTOWER ---
 // ==========================================
 app.get('/api/admin/all-transactions', protect, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "UNAUTHORIZED" });
