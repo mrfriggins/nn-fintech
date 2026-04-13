@@ -3,7 +3,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const sgMail = require('@sendgrid/mail'); // <-- REPLACED NODEMAILER
+const sgMail = require('@sendgrid/mail');
 const crypto = require('crypto');
 require('dotenv').config();
 
@@ -146,13 +146,14 @@ app.post('/auth/register', async (req, res) => {
             throw saveErr; 
         }
 
-        // --- SENDGRID API DISPATCH ---
+        // --- SENDGRID API DISPATCH (HARDCODED VERIFIED SENDER) ---
         let emailSent = false;
         try {
-            if (process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL) {
+            if (process.env.SENDGRID_API_KEY) { 
                 const msg = {
                     to: email, 
-                    from: process.env.SENDGRID_FROM_EMAIL,
+                    // EXACT VERIFIED SENDER HARDCODED TO BYPASS RENDER CACHE:
+                    from: "nn.fintech.noreply@gmail.com", 
                     subject: "Access Code: NN-Fintech", 
                     text: `Your Vault Access Code is: ${otp}\n\nDo not share this code.`,
                     html: `<h2>NN-Fintech Access</h2><p>Your Vault Access Code is: <strong style="font-size:24px; color:#00ff41; background:#000; padding:10px;">${otp}</strong></p><p>Do not share this code.</p>`
@@ -161,7 +162,7 @@ app.post('/auth/register', async (req, res) => {
                 console.log(`[DISPATCH] SendGrid successfully delivered email to ${email}`);
                 emailSent = true;
             } else {
-                console.log(`[DISPATCH ABORTED] SendGrid Environment Variables missing.`);
+                console.log(`[DISPATCH ABORTED] SendGrid API Key missing from Render Environment.`);
             }
         } catch (e) { 
             console.error(`[DISPATCH FAILED] SendGrid Error:`, e.response ? e.response.body : e.message); 
@@ -170,6 +171,7 @@ app.post('/auth/register', async (req, res) => {
         res.status(201).json({ message: "Registration recorded.", emailDispatched: emailSent });
 
     } catch (err) { 
+        console.error("[DB FATAL] Registration crash:", err);
         res.status(500).json({ error: "Database rejection. Check logs." }); 
     }
 });
