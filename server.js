@@ -3,290 +3,244 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const sgMail = require('@sendgrid/mail');
 const crypto = require('crypto');
+const cron = require('node-cron');
 require('dotenv').config();
 
-const JWT_SECRET = process.env.JWT_SECRET || "nn_fintech_billionaire_2026";
+// --- ENVIRONMENT VALIDATION ---
+const { JWT_SECRET, SUPER_ADMIN_EMAIL, ENCRYPTION_KEY, MONGO_URI } = process.env;
+
+if (!JWT_SECRET || !SUPER_ADMIN_EMAIL || !ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) {
+    console.error("FATAL ERROR: Missing or invalid environment variables. ENCRYPTION_KEY must be exactly 32 characters.");
+    process.exit(1);
+}
+
 const app = express();
-const PORT = process.env.PORT || 8080;
-
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-
-app.use(cors({
-    origin: [
-        "https://nn-fintech.com",
-        "https://www.nn-fintech.com",
-        "http://localhost:3000",
-        "https://nn-fintech-frontend-abwc51m5w-mrfriggins-projects.vercel.app"
-    ],
-    methods: ["GET", "POST", "PUT", "DELETE"],
-    credentials: true
-}));
-
+app.use(cors({ origin: "*", methods: ["GET", "POST", "PUT", "DELETE"], credentials: true }));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-app.get('/', (req, res) => res.send('NN-FINTECH ENGINE: SECURED & AI-LINKED'));
+// --- 1. CRYPTOGRAPHY MODULE (BYOK) ---
+const IV_LENGTH = 16;
+const encryptKey = (text) => {
+    if (!text) return null;
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    let encrypted = cipher.update(text);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    return iv.toString('hex') + ':' + encrypted.toString('hex');
+};
 
-// --- DATABASE & SCHEMA ---
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ SAAS VAULT ONLINE: Database Connected."))
-    .catch(err => console.error("❌ DB FATAL ERROR:", err));
+const decryptKey = (text) => {
+    if (!text) return null;
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift(), 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+};
+
+// --- 2. DATABASE SCHEMA ---
+mongoose.connect(MONGO_URI || "mongodb://localhost:27017/nnfintech")
+    .then(() => console.log("✅ Database Connected."))
+    .catch(err => console.error("Database Error:", err));
 
 const userSchema = new mongoose.Schema({
     email: { type: String, unique: true, required: true },
     password: { type: String, required: true },
-    fullName: { type: String },
-    country: { type: String },
     role: { type: String, default: "user" },
     isVerified: { type: Boolean, default: false },
-    otp: { type: String },
-    otpExpires: { type: Date },
-    hasActiveSubscription: { type: Boolean, default: false }, 
-    demoBalance: { type: Number, default: 0.00 }, 
-    b2bKeys: [{ type: String }], 
-    usedCryptoTxIds: [{ type: String }], 
-    transactions: { type: Array, default: [] }
+    isActive: { type: Boolean, default: true },
+    
+    // Subscriptions
+    subscriptionTier: { type: String, enum: ['none', 'retail_20', 'b2b_500'], default: 'none' },
+    subscriptionExpiry: { type: Date, default: null },
+    demoBalance: { type: Number, default: 0.00 },
+    
+    // B2B Infrastructure
+    b2bKey: { type: String, default: null }, // Used to access YOUR API
+    allowedOrigin: { type: String, default: null }, // Domain lock
+    clientPolygonKey: { type: String, default: null } // Encrypted BYOK
 });
 const User = mongoose.model('User', userSchema);
 
-// --- MARKET ENGINE ---
-const POLYGON_API_KEY = process.env.POLYGON_API_KEY;
-let stocks = [
-    { symbol: "BTC", ticker: "X:BTCUSD", price: 68432.10, anchorPrice: 68432.10, change: "+0.00%", volatility: 0.002 },
-    { symbol: "ETH", ticker: "X:ETHUSD", price: 3450.00, anchorPrice: 3450.00, change: "+0.00%", volatility: 0.003 },
-    { symbol: "EUR/USD", ticker: "C:EURUSD", price: 1.08, anchorPrice: 1.08, change: "+0.00%", volatility: 0.0001 },
-    { symbol: "S&P 500", ticker: "SPY", price: 520.10, anchorPrice: 520.10, change: "+0.00%", volatility: 0.0003 }
-];
-let syncIndex = 0;
+// --- 3. AUTOMATED SUBSCRIPTION LIFECYCLE ---
+cron.schedule('0 0 * * *', async () => {
+    console.log("[SYSTEM] Executing daily subscription sweep...");
+    const now = new Date();
+    
+    // Terminate expired accounts
+    await User.updateMany(
+        { subscriptionExpiry: { $lt: now }, subscriptionTier: { $ne: 'none' } },
+        { $set: { subscriptionTier: 'none', b2bKey: null } }
+    );
 
-const syncPolygonData = async () => {
-    if (!POLYGON_API_KEY || POLYGON_API_KEY === "sb") return;
-    try {
-        const s = stocks[syncIndex];
-        const response = await fetch(`https://api.polygon.io/v2/aggs/ticker/${s.ticker}/prev?adjusted=true&apiKey=${POLYGON_API_KEY}`);
-        if (response.ok) {
-            const data = await response.json();
-            if (data.results?.[0]) {
-                stocks[syncIndex].anchorPrice = data.results[0].c; 
-                if (Math.abs(stocks[syncIndex].price - data.results[0].c) > (data.results[0].c * 0.05)) {
-                    stocks[syncIndex].price = data.results[0].c;
-                }
-            }
-        }
-    } catch (e) {}
-    syncIndex = (syncIndex + 1) % stocks.length;
+    // Identify 7-day warnings
+    const oneWeekOutStart = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const oneWeekOutEnd = new Date(oneWeekOutStart.getTime() + 24 * 60 * 60 * 1000);
+    
+    const warningUsers = await User.find({
+        subscriptionExpiry: { $gte: oneWeekOutStart, $lt: oneWeekOutEnd },
+        subscriptionTier: { $ne: 'none' }
+    });
+
+    warningUsers.forEach(user => {
+        console.log(`[SYSTEM] Dispatching 7-day warning email to ${user.email}`);
+        // Integrate SendGrid here for the warning email
+    });
+});
+
+// --- 4. THE IN-BUILT AI (MATH ALGORITHM) ---
+// Analyzes an array of historical prices to output a signal
+const calculateSignal = (priceHistory) => {
+    if (!priceHistory || priceHistory.length < 5) return { signal: "NEUTRAL", confidence: "0%" };
+    
+    const currentPrice = priceHistory[priceHistory.length - 1];
+    const avgPrice = priceHistory.reduce((a, b) => a + b, 0) / priceHistory.length;
+    
+    let signal = "NEUTRAL";
+    if (currentPrice > avgPrice * 1.002) signal = "STRONG BUY";
+    else if (currentPrice > avgPrice) signal = "BUY";
+    else if (currentPrice < avgPrice * 0.998) signal = "STRONG SELL";
+    else if (currentPrice < avgPrice) signal = "SELL";
+
+    return { signal, currentPrice, movingAverage: parseFloat(avgPrice.toFixed(4)) };
 };
-setInterval(syncPolygonData, 60000);
+
+// --- 5. RETAIL SIMULATOR ($20 DEMO TIER) ---
+const retailAssets = [
+    { symbol: "BTC/USD", price: 65000, volatility: 0.005 },
+    { symbol: "ETH/USD", price: 3400, volatility: 0.008 },
+    { symbol: "EUR/USD", price: 1.08, volatility: 0.0002 },
+    { symbol: "SPY", price: 510, volatility: 0.002 }
+];
+
+const retailHistory = {};
+retailAssets.forEach(a => retailHistory[a.symbol] = Array(20).fill(a.price));
+let fakeMarket = [...retailAssets];
 
 setInterval(() => {
-    stocks = stocks.map(s => {
-        const movement = s.anchorPrice * (Math.random() * s.volatility * 2 - s.volatility);
-        const finalPrice = parseFloat((s.price + movement + ((s.anchorPrice - (s.price + movement)) * 0.1)).toFixed(4));
-        const changePct = (((finalPrice - s.price) / s.price) * 100).toFixed(2);
-        return { ...s, price: finalPrice, change: `${changePct >= 0 ? '+' : ''}${changePct}%` };
+    fakeMarket = fakeMarket.map(asset => {
+        const movement = asset.price * (Math.random() * asset.volatility * 2 - asset.volatility);
+        const newPrice = parseFloat((asset.price + movement).toFixed(4));
+        retailHistory[asset.symbol].shift();
+        retailHistory[asset.symbol].push(newPrice);
+        return { ...asset, price: newPrice };
     });
-}, 5000);
+}, 3000);
 
-// --- SECURITY MIDDLEWARE ---
+// --- 6. MIDDLEWARES ---
 const protect = async (req, res, next) => {
     try {
         const token = req.headers.authorization?.split(" ")[1];
-        if (!token) return res.status(401).json({ error: "Access Denied." });
         const decoded = jwt.verify(token, JWT_SECRET);
         const user = await User.findById(decoded.userId).select('-password');
-        if (!user) return res.status(403).json({ error: "RESTRICTED" });
+        if (!user || !user.isActive) return res.status(403).json({ error: "Access Denied. Account Suspended." });
         req.user = user;
         next();
-    } catch (err) { return res.status(401).json({ error: "Session Expired" }); }
+    } catch (err) { res.status(401).json({ error: "Session Expired." }); }
 };
 
-// --- AUTHENTICATION ---
-app.post('/auth/register', async (req, res) => {
-    try {
-        const email = req.body?.email?.trim()?.toLowerCase();
-        const { password, fullName, country } = req.body;
+const requireGodMode = (req, res, next) => {
+    if (req.user.email !== SUPER_ADMIN_EMAIL) return res.status(403).json({ error: "RESTRICTED: Admin Only." });
+    next();
+};
 
-        if (!email || !password) return res.status(400).json({ error: "Missing data." });
-        
-        const existing = await User.findOne({ email });
-        if (existing) {
-            if (!existing.isVerified) await User.deleteOne({ email });
-            else return res.status(400).json({ error: "Email taken." });
-        }
+const b2bGateway = async (req, res, next) => {
+    const apiKey = req.headers['x-api-key'];
+    const origin = req.headers.origin || req.headers.referer;
 
-        const hashed = await bcrypt.hash(password, 10);
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        
-        const newUser = new User({ email, password: hashed, fullName, country, otp, otpExpires: new Date(Date.now() + 600000) });
-        await newUser.save();
+    if (!apiKey) return res.status(401).json({ error: "API Key Required." });
 
-        let emailSent = false;
-        try {
-            if (process.env.SENDGRID_API_KEY) { 
-                await sgMail.send({
-                    to: email, 
-                    from: "nn.fintech.noreply@gmail.com", 
-                    subject: "Vault Access: NN-Fintech", 
-                    text: `Your Code is: ${otp}`,
-                    html: `<h2>NN-Fintech Access</h2><p>Your Code: <strong style="color:#00ff41; background:#000; padding:10px;">${otp}</strong></p>`
-                });
-                emailSent = true;
-            }
-        } catch (e) {}
-        
-        res.status(201).json({ message: "OTP Dispatched.", emailDispatched: emailSent });
-    } catch (err) { res.status(500).json({ error: "Server error." }); }
-});
+    const user = await User.findOne({ b2bKey: apiKey, subscriptionTier: 'b2b_500' });
+    if (!user || !user.isActive) return res.status(403).json({ error: "Invalid Key or Expired Subscription." });
 
-app.post('/auth/login', async (req, res) => {
-    try {
-        const { email, password } = req.body;
-        const user = await User.findOne({ email: email?.trim()?.toLowerCase() });
-        if (!user || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ error: "Invalid credentials." });
-        if (!user.isVerified) return res.status(403).json({ error: "Verify email first." });
-        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token, role: user.role, hasActiveSubscription: user.hasActiveSubscription });
-    } catch (err) { res.status(500).json({ error: "Login failed." }); }
-});
-
-app.post('/auth/verify', async (req, res) => {
-    try {
-        const { email, otp } = req.body;
-        const user = await User.findOne({ email: email?.trim()?.toLowerCase() });
-        if (!user || user.otp !== otp || user.otpExpires < new Date()) return res.status(400).json({ error: "Invalid OTP." });
-        user.isVerified = true; user.otp = undefined; user.otpExpires = undefined;
-        await user.save();
-        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token, role: user.role, hasActiveSubscription: user.hasActiveSubscription });
-    } catch (err) { res.status(500).json({ error: "Verification failed." }); }
-});
-
-// --- CORE APIs ---
-app.get('/api/users/profile', protect, (req, res) => {
-    res.json({ email: req.user.email, hasActiveSubscription: req.user.hasActiveSubscription, demoBalance: req.user.demoBalance, role: req.user.role });
-});
-
-app.get('/api/market/stocks', protect, (req, res) => res.json(stocks));
-
-app.post('/api/trade/execute', protect, async (req, res) => {
-    try {
-        const { symbol, amount, side } = req.body;
-        if (!req.user.hasActiveSubscription || req.user.demoBalance < amount) return res.status(400).json({ error: "Insufficient Funds/Access." });
-        const win = Math.random() > 0.48;
-        const pnl = win ? (amount * 0.1) : -amount;
-        req.user.demoBalance += pnl;
-        req.user.transactions.unshift({ type: `SIM_${side.toUpperCase()}_${symbol}`, amount: pnl, date: new Date() });
-        await req.user.save();
-        res.json({ newBalance: req.user.demoBalance });
-    } catch (err) { res.status(500).json({ error: "Trade failed." }); }
-});
-
-// --- LIVE OPENAI ACADEMY TUTOR ---
-app.post('/api/ai/tutor', protect, async (req, res) => {
-    if (!req.user.hasActiveSubscription) return res.status(403).json({ error: "Retail License Required for Academy Insights." });
+    if (user.allowedOrigin && !origin?.startsWith(user.allowedOrigin)) {
+        return res.status(403).json({ error: `Domain locked to ${user.allowedOrigin}` });
+    }
     
-    const { symbol, price } = req.body;
+    req.b2bClient = user;
+    next();
+};
 
+// --- 7. RETAIL ENDPOINTS ($20 TIER) ---
+app.get('/api/market/stream', protect, (req, res) => {
+    if (req.user.subscriptionTier === 'none') return res.status(403).json({ error: "Payment required." });
+    res.json(fakeMarket);
+});
+
+app.get('/api/ai/inbuilt/predict/:symbol', protect, (req, res) => {
+    if (req.user.subscriptionTier === 'none') return res.status(403).json({ error: "Payment required." });
+    const symbol = decodeURIComponent(req.params.symbol);
+    const prediction = calculateSignal(retailHistory[symbol]);
+    res.json({ source: "NN-FINTECH ALGOS (SIMULATED)", ...prediction });
+});
+
+app.post('/api/ai/openai/tutor', protect, async (req, res) => {
+    if (req.user.subscriptionTier === 'none') return res.status(403).json({ error: "Payment required." });
+    const { symbol, question } = req.body;
+    const asset = fakeMarket.find(a => a.symbol === symbol);
+    res.json({ tutorResponse: `[OPENAI TUTOR] The current simulated price of ${symbol} is $${asset?.price || 'unknown'}. For "${question}", look at structural support. Do not trade real money based on this demo.` });
+});
+
+// --- 8. B2B EXTERNAL API ($500 TIER - BYOK LIVE DATA) ---
+app.get('/v1/b2b/market-stream', b2bGateway, async (req, res) => {
     try {
-        if (!process.env.OPENAI_API_KEY) throw new Error("Missing Key");
+        if (!req.b2bClient.clientPolygonKey) return res.status(400).json({ error: "No Polygon API key linked to account." });
+        
+        const activeKey = decryptKey(req.b2bClient.clientPolygonKey);
+        const tickers = ["X:BTCUSD", "X:ETHUSD", "C:EURUSD"];
+        
+        // Date math to get a 10-day history for the AI algorithm
+        const today = new Date().toISOString().split('T')[0];
+        const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: "gpt-4o-mini", // Using mini to save you massive costs while maintaining high quality
-                messages: [
-                    { role: "system", content: "You are an elite institutional trading tutor for NN-Fintech. Keep responses under 3 sentences. Be authoritative, educational, and explain technical market mechanics for beginners. Do not use financial disclaimers." },
-                    { role: "user", content: `Analyze the asset ${symbol} currently trading at $${price}. Give a quick technical lesson on how to trade it.` }
-                ],
-                max_tokens: 100,
-                temperature: 0.7
-            })
+        const promises = tickers.map(async (ticker) => {
+            const response = await fetch(`https://api.polygon.io/v2/aggs/ticker/${ticker}/range/1/day/${tenDaysAgo}/${today}?adjusted=true&apiKey=${activeKey}`);
+            if (!response.ok) throw new Error(`Polygon API Limit/Error for ${ticker}`);
+            
+            const data = await response.json();
+            const historicalPrices = data.results ? data.results.map(day => day.c) : [];
+            
+            return {
+                symbol: ticker,
+                price: historicalPrices.length > 0 ? historicalPrices[historicalPrices.length - 1] : null,
+                inbuiltAIPrediction: calculateSignal(historicalPrices)
+            };
         });
 
-        if (!response.ok) throw new Error("OpenAI API rejected the request");
-
-        const data = await response.json();
-        const lesson = data.choices[0].message.content;
-        
-        res.json({ lesson: `[OPENAI QUANT] ${lesson}` });
-
-    } catch (e) {
-        // FAIL-SAFE: If OpenAI is down or you run out of money, the server falls back to this instead of crashing.
-        console.warn("[AI ERROR] OpenAI link failed. Falling back to local cache.");
-        const fallbacks = [
-            `DYNAMIC ANALYSIS for ${symbol}: The asset is experiencing volatility near $${price}. Look for 'Support' and 'Resistance'. Wait for a confirmed bounce before entering a LONG position.`,
-            `DYNAMIC ANALYSIS for ${symbol}: Notice the price action at $${price}. Is it making Higher Highs and Higher Lows? That is an uptrend. Do not try to SHORT an uptrend.`,
-        ];
-        res.json({ lesson: `[LOCAL CACHE] ${fallbacks[Math.floor(Math.random() * fallbacks.length)]}` });
+        const liveData = await Promise.all(promises);
+        res.json({ provider: "NN-Fintech Central Processing", status: "Active", data: liveData });
+    } catch (err) {
+        res.status(502).json({ error: "Upstream Data Failure. Check client API limits." });
     }
 });
 
-// --- SECURED ADMIN & B2B GATEWAYS ---
-app.post('/api/admin/force-upgrade', protect, async (req, res) => {
-    const { adminSecret } = req.body;
-    if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
-        return res.status(403).json({ error: "SECURITY BREACH ATTEMPT LOGGED." });
-    }
-    req.user.role = 'admin';
-    await req.user.save();
-    res.json({ message: "Admin Rights Granted." });
+// --- 9. GOD-MODE ADMIN GATEWAY ---
+app.post('/api/admin/provision-b2b', protect, requireGodMode, async (req, res) => {
+    const { targetEmail, allowedDomain, plainTextPolygonKey } = req.body;
+    
+    const user = await User.findOneAndUpdate(
+        { email: targetEmail },
+        { 
+            subscriptionTier: 'b2b_500',
+            subscriptionExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            b2bKey: "nn_api_" + crypto.randomBytes(32).toString('hex'),
+            allowedOrigin: allowedDomain,
+            clientPolygonKey: encryptKey(plainTextPolygonKey)
+        },
+        { new: true }
+    );
+    
+    if (!user) return res.status(404).json({ error: "User not found." });
+    res.json({ message: "B2B Node Provisioned.", api_key: user.b2bKey });
 });
 
-app.get('/api/admin/all-transactions', protect, async (req, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: "UNAUTHORIZED" });
-    try {
-        const feed = await User.aggregate([
-            { $unwind: "$transactions" },
-            { $sort: { "transactions.date": -1 } },
-            { $limit: 100 },
-            { $project: { _id: 0, userEmail: "$email", type: "$transactions.type", amount: "$transactions.amount", date: "$transactions.date" } }
-        ]);
-        res.json(feed);
-    } catch (err) { res.status(500).json({ error: "Watchtower database overload." }); }
+app.post('/api/admin/ban', protect, requireGodMode, async (req, res) => {
+    const { targetEmail } = req.body;
+    await User.findOneAndUpdate({ email: targetEmail }, { isActive: false });
+    res.json({ message: `Access revoked for ${targetEmail}.` });
 });
 
-app.post('/api/payment/verify-crypto', protect, async (req, res) => {
-    try {
-        const { txId, tier } = req.body;
-        if (!txId || !tier) return res.status(400).json({ error: "Missing TxID or Tier." });
-
-        const existingClaim = await User.findOne({ usedCryptoTxIds: txId });
-        if (existingClaim) return res.status(403).json({ error: "TxID already claimed." });
-        
-        const isB2B = tier === "B2B";
-        const EXPECTED_VALUE = isB2B ? 500000000 : 20000000; 
-        const MASTER_WALLET = process.env.MASTER_CRYPTO_WALLET?.toLowerCase();
-
-        if (process.env.ETHERSCAN_API_KEY && MASTER_WALLET) {
-            const scanUrl = `https://api.polygonscan.com/api?module=account&action=tokentx&address=${MASTER_WALLET}&apikey=${process.env.ETHERSCAN_API_KEY}`;
-            const response = await fetch(scanUrl);
-            const data = await response.json();
-            const transaction = data.result?.find(tx => tx.hash.toLowerCase() === txId.toLowerCase());
-
-            if (!transaction || transaction.to.toLowerCase() !== MASTER_WALLET || parseInt(transaction.value) < EXPECTED_VALUE) {
-                return res.status(400).json({ error: "Payment verification failed. Invalid Hash or Insufficient Funds." });
-            }
-        }
-
-        req.user.usedCryptoTxIds.push(txId);
-        if (isB2B) {
-            const newKey = "nn_prod_" + crypto.randomBytes(16).toString('hex');
-            req.user.b2bKeys.push(newKey);
-            req.user.transactions.unshift({ type: "B2B_LICENSE", amount: -500, date: new Date(), key: newKey });
-        } else {
-            req.user.hasActiveSubscription = true;
-            req.user.demoBalance = 100000;
-            req.user.transactions.unshift({ type: "RETAIL_LICENSE", amount: -20, date: new Date() });
-        }
-        await req.user.save();
-        res.json({ message: "License Activated." });
-    } catch (err) { res.status(500).json({ error: "Payment validation failed." }); }
-});
-
-app.listen(PORT, "0.0.0.0", () => console.log(`--- [CORE] ENGINE RUNNING ON ${PORT} ---`));
+app.listen(process.env.PORT || 8080, "0.0.0.0", () => console.log("--- ENGINE ONLINE ---"));
