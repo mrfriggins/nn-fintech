@@ -27,7 +27,7 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.get('/', (req, res) => res.send('NN-FINTECH ENGINE: OPERATIONAL'));
+app.get('/', (req, res) => res.send('NN-FINTECH ENGINE: SECURED & AI-LINKED'));
 
 // --- DATABASE & SCHEMA ---
 mongoose.connect(process.env.MONGO_URI)
@@ -47,7 +47,7 @@ const userSchema = new mongoose.Schema({
     demoBalance: { type: Number, default: 0.00 }, 
     b2bKeys: [{ type: String }], 
     usedCryptoTxIds: [{ type: String }], 
-    transactions: [{ type: Array, default: [] }]
+    transactions: { type: Array, default: [] }
 });
 const User = mongoose.model('User', userSchema);
 
@@ -183,25 +183,56 @@ app.post('/api/trade/execute', protect, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Trade failed." }); }
 });
 
-// --- RETAIL ACADEMY TUTOR (REPLACES QUANT AI) ---
-app.post('/api/ai/tutor', protect, (req, res) => {
+// --- LIVE OPENAI ACADEMY TUTOR ---
+app.post('/api/ai/tutor', protect, async (req, res) => {
     if (!req.user.hasActiveSubscription) return res.status(403).json({ error: "Retail License Required for Academy Insights." });
     
-    const { symbol } = req.body;
-    const lessons = [
-        `ACADEMY LESSON: What drives ${symbol}? Prices move based on Supply and Demand. When more buyers enter the market than sellers, the price goes up. Watch how the price reacts to news events.`,
-        `RISK MANAGEMENT: Never risk your entire account on a single ${symbol} trade. Professional traders usually risk no more than 1% to 2% of their total balance per position.`,
-        `TRADING PSYCHOLOGY: The market is driven by Fear and Greed. If you feel panicked watching ${symbol} drop, your position size is too big. Reduce your exposure.`,
-        `MECHANICS: A "LONG" position means you buy ${symbol} hoping the price goes up. A "SHORT" position means you are betting against ${symbol}, making profit if the price falls.`,
-        `TOOLSET: Always set a mental "Stop-Loss". This is the exact price where you admit your trade on ${symbol} was wrong and you close it to prevent a massive loss.`
-    ];
-    
-    const selectedLesson = lessons[Math.floor(Math.random() * lessons.length)];
-    res.json({ lesson: selectedLesson });
+    const { symbol, price } = req.body;
+
+    try {
+        if (!process.env.OPENAI_API_KEY) throw new Error("Missing Key");
+
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: "gpt-4o-mini", // Using mini to save you massive costs while maintaining high quality
+                messages: [
+                    { role: "system", content: "You are an elite institutional trading tutor for NN-Fintech. Keep responses under 3 sentences. Be authoritative, educational, and explain technical market mechanics for beginners. Do not use financial disclaimers." },
+                    { role: "user", content: `Analyze the asset ${symbol} currently trading at $${price}. Give a quick technical lesson on how to trade it.` }
+                ],
+                max_tokens: 100,
+                temperature: 0.7
+            })
+        });
+
+        if (!response.ok) throw new Error("OpenAI API rejected the request");
+
+        const data = await response.json();
+        const lesson = data.choices[0].message.content;
+        
+        res.json({ lesson: `[OPENAI QUANT] ${lesson}` });
+
+    } catch (e) {
+        // FAIL-SAFE: If OpenAI is down or you run out of money, the server falls back to this instead of crashing.
+        console.warn("[AI ERROR] OpenAI link failed. Falling back to local cache.");
+        const fallbacks = [
+            `DYNAMIC ANALYSIS for ${symbol}: The asset is experiencing volatility near $${price}. Look for 'Support' and 'Resistance'. Wait for a confirmed bounce before entering a LONG position.`,
+            `DYNAMIC ANALYSIS for ${symbol}: Notice the price action at $${price}. Is it making Higher Highs and Higher Lows? That is an uptrend. Do not try to SHORT an uptrend.`,
+        ];
+        res.json({ lesson: `[LOCAL CACHE] ${fallbacks[Math.floor(Math.random() * fallbacks.length)]}` });
+    }
 });
 
-// --- ADMIN WATCHTOWER ---
+// --- SECURED ADMIN & B2B GATEWAYS ---
 app.post('/api/admin/force-upgrade', protect, async (req, res) => {
+    const { adminSecret } = req.body;
+    if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+        return res.status(403).json({ error: "SECURITY BREACH ATTEMPT LOGGED." });
+    }
     req.user.role = 'admin';
     await req.user.save();
     res.json({ message: "Admin Rights Granted." });
@@ -210,20 +241,41 @@ app.post('/api/admin/force-upgrade', protect, async (req, res) => {
 app.get('/api/admin/all-transactions', protect, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "UNAUTHORIZED" });
     try {
-        const users = await User.find({}, 'email transactions').lean();
-        const feed = users.flatMap(u => u.transactions.map(t => ({ ...t, userEmail: u.email })));
-        res.json(feed.sort((a, b) => new Date(b.date) - new Date(a.date)));
-    } catch (err) { res.status(500).json({ error: "Watchtower fail." }); }
+        const feed = await User.aggregate([
+            { $unwind: "$transactions" },
+            { $sort: { "transactions.date": -1 } },
+            { $limit: 100 },
+            { $project: { _id: 0, userEmail: "$email", type: "$transactions.type", amount: "$transactions.amount", date: "$transactions.date" } }
+        ]);
+        res.json(feed);
+    } catch (err) { res.status(500).json({ error: "Watchtower database overload." }); }
 });
 
 app.post('/api/payment/verify-crypto', protect, async (req, res) => {
     try {
         const { txId, tier } = req.body;
+        if (!txId || !tier) return res.status(400).json({ error: "Missing TxID or Tier." });
+
         const existingClaim = await User.findOne({ usedCryptoTxIds: txId });
-        if (existingClaim) return res.status(403).json({ error: "TxID claimed." });
+        if (existingClaim) return res.status(403).json({ error: "TxID already claimed." });
         
+        const isB2B = tier === "B2B";
+        const EXPECTED_VALUE = isB2B ? 500000000 : 20000000; 
+        const MASTER_WALLET = process.env.MASTER_CRYPTO_WALLET?.toLowerCase();
+
+        if (process.env.ETHERSCAN_API_KEY && MASTER_WALLET) {
+            const scanUrl = `https://api.polygonscan.com/api?module=account&action=tokentx&address=${MASTER_WALLET}&apikey=${process.env.ETHERSCAN_API_KEY}`;
+            const response = await fetch(scanUrl);
+            const data = await response.json();
+            const transaction = data.result?.find(tx => tx.hash.toLowerCase() === txId.toLowerCase());
+
+            if (!transaction || transaction.to.toLowerCase() !== MASTER_WALLET || parseInt(transaction.value) < EXPECTED_VALUE) {
+                return res.status(400).json({ error: "Payment verification failed. Invalid Hash or Insufficient Funds." });
+            }
+        }
+
         req.user.usedCryptoTxIds.push(txId);
-        if (tier === "B2B") {
+        if (isB2B) {
             const newKey = "nn_prod_" + crypto.randomBytes(16).toString('hex');
             req.user.b2bKeys.push(newKey);
             req.user.transactions.unshift({ type: "B2B_LICENSE", amount: -500, date: new Date(), key: newKey });
@@ -234,7 +286,7 @@ app.post('/api/payment/verify-crypto', protect, async (req, res) => {
         }
         await req.user.save();
         res.json({ message: "License Activated." });
-    } catch (err) { res.status(500).json({ error: "Payment fail." }); }
+    } catch (err) { res.status(500).json({ error: "Payment validation failed." }); }
 });
 
 app.listen(PORT, "0.0.0.0", () => console.log(`--- [CORE] ENGINE RUNNING ON ${PORT} ---`));
