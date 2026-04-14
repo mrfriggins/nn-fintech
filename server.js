@@ -386,6 +386,16 @@ app.get('/v1/b2b/market-stream', b2bGateway, async (req, res) => {
 });
 
 // --- 11. GOD-MODE ADMIN GATEWAY ---
+
+app.get('/api/admin/users', protect, requireGodMode, async (req, res) => {
+    try {
+        const users = await User.find().select('-password').sort({ _id: -1 });
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch users." });
+    }
+});
+
 app.post('/api/admin/provision-b2b', protect, requireGodMode, async (req, res) => {
     const { targetEmail, allowedDomain, plainTextPolygonKey } = req.body;
     
