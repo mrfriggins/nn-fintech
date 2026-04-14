@@ -190,6 +190,15 @@ const b2bGateway = async (req, res, next) => {
 };
 
 // --- 7. AUTHENTICATION & IDENTITY ---
+const sgMail = require('@sendgrid/mail');
+
+// Initialize SendGrid
+if (process.env.SENDGRID_API_KEY) {
+    sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+} else {
+    console.warn("FATAL WARNING: SENDGRID_API_KEY is missing. OTP emails will fail.");
+}
+
 app.post('/auth/register', async (req, res) => {
     try {
         const email = req.body?.email?.trim()?.toLowerCase();
@@ -209,10 +218,31 @@ app.post('/auth/register', async (req, res) => {
         const newUser = new User({ email, password: hashed, fullName, country, otp, otpExpires: new Date(Date.now() + 600000) });
         await newUser.save();
 
-        console.log(`[SECURITY] OTP for ${email} is: ${otp}`);
+        // Dispatch the actual email via SendGrid
+        const msg = {
+            to: email,
+            from: process.env.SENDGRID_FROM_EMAIL, // This MUST be the email you verified in SendGrid
+            subject: "Your Access Protocol OTP",
+            html: `
+                <div style="font-family: monospace; background-color: #0a0a0a; color: #fff; padding: 40px; text-align: center;">
+                    <h2 style="color: #00ff41; text-transform: uppercase;">NN-Fintech Identity Verification</h2>
+                    <p style="color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 2px;">Your secure access node requires authorization.</p>
+                    <div style="margin: 30px auto; padding: 20px; border: 1px solid #00ff41; display: inline-block; font-size: 32px; font-weight: bold; color: #00ff41; letter-spacing: 5px;">
+                        ${otp}
+                    </div>
+                    <p style="color: #888; font-size: 10px;">This key expires in 10 minutes. Do not share it.</p>
+                </div>
+            `
+        };
+
+        await sgMail.send(msg);
+        console.log(`[SECURITY] OTP successfully dispatched to ${email} via SendGrid`);
 
         res.status(201).json({ message: "OTP Dispatched." });
-    } catch (err) { res.status(500).json({ error: "Server error." }); }
+    } catch (err) { 
+        console.error("Mail Error:", err.response ? err.response.body : err);
+        res.status(500).json({ error: "Failed to dispatch email. Check SendGrid configuration." }); 
+    }
 });
 
 app.post('/auth/login', async (req, res) => {
