@@ -80,9 +80,8 @@ cron.schedule('0 0 * * *', async () => {
     );
 });
 
-// --- 4. EXPANDED RETAIL SIMULATOR ($20 DEMO TIER) ---
+// --- 4. EXPANDED RETAIL SIMULATOR & ALGOS ($20 DEMO TIER) ---
 const retailAssets = [
-    // Crypto (15 Assets)
     { symbol: "BTC/USD", price: 68400.00, volatility: 0.005 },
     { symbol: "ETH/USD", price: 3450.00, volatility: 0.008 },
     { symbol: "SOL/USD", price: 145.20, volatility: 0.012 },
@@ -98,8 +97,6 @@ const retailAssets = [
     { symbol: "BCH/USD", price: 480.00, volatility: 0.011 },
     { symbol: "UNI/USD", price: 11.20, volatility: 0.013 },
     { symbol: "ATOM/USD", price: 10.80, volatility: 0.012 },
-
-    // Forex (12 Pairs)
     { symbol: "EUR/USD", price: 1.0850, volatility: 0.0002 },
     { symbol: "GBP/USD", price: 1.2630, volatility: 0.0003 },
     { symbol: "USD/JPY", price: 151.20, volatility: 0.001 },
@@ -112,8 +109,6 @@ const retailAssets = [
     { symbol: "GBP/JPY", price: 191.05, volatility: 0.0009 },
     { symbol: "AUD/JPY", price: 98.90, volatility: 0.0007 },
     { symbol: "USD/CNH", price: 7.2450, volatility: 0.0003 },
-
-    // Indices (8 Assets)
     { symbol: "SPY", price: 520.15, volatility: 0.002 },
     { symbol: "QQQ", price: 445.30, volatility: 0.003 },
     { symbol: "DIA", price: 395.10, volatility: 0.0015 },
@@ -122,15 +117,13 @@ const retailAssets = [
     { symbol: "FTSE", price: 7950.20, volatility: 0.002 },
     { symbol: "DAX", price: 18200.50, volatility: 0.0025 },
     { symbol: "NIKKEI", price: 39800.00, volatility: 0.003 },
-
-    // Commodities (14 Assets)
     { symbol: "GOLD", price: 2350.00, volatility: 0.004 },
     { symbol: "SILVER", price: 28.50, volatility: 0.006 },
     { symbol: "PLATINUM", price: 950.00, volatility: 0.005 },
     { symbol: "PALLADIUM", price: 1020.00, volatility: 0.008 },
     { symbol: "COPPER", price: 4.15, volatility: 0.007 },
-    { symbol: "USOIL (WTI)", price: 82.40, volatility: 0.008 },
-    { symbol: "UKOIL (BRENT)", price: 86.90, volatility: 0.007 },
+    { symbol: "USOIL", price: 82.40, volatility: 0.008 },
+    { symbol: "UKOIL", price: 86.90, volatility: 0.007 },
     { symbol: "NATGAS", price: 1.85, volatility: 0.015 },
     { symbol: "CORN", price: 435.50, volatility: 0.005 },
     { symbol: "WHEAT", price: 560.25, volatility: 0.006 },
@@ -138,8 +131,6 @@ const retailAssets = [
     { symbol: "COFFEE", price: 185.40, volatility: 0.008 },
     { symbol: "SUGAR", price: 22.10, volatility: 0.007 },
     { symbol: "COTTON", price: 92.50, volatility: 0.006 },
-
-    // Equities (15 Assets)
     { symbol: "AAPL", price: 172.50, volatility: 0.003 },
     { symbol: "TSLA", price: 175.20, volatility: 0.009 },
     { symbol: "MSFT", price: 425.10, volatility: 0.0025 },
@@ -157,11 +148,37 @@ const retailAssets = [
     { symbol: "WMT", price: 60.50, volatility: 0.0015 }
 ];
 
-let fakeMarket = [...retailAssets];
+const calculateSignal = (priceHistory) => {
+    if (!priceHistory || priceHistory.length < 5) return { signal: "NEUTRAL", confidence: "0%" };
+    
+    const currentPrice = priceHistory[priceHistory.length - 1];
+    const avgPrice = priceHistory.reduce((a, b) => a + b, 0) / priceHistory.length;
+    
+    let signal = "NEUTRAL";
+    if (currentPrice > avgPrice * 1.002) signal = "STRONG BUY";
+    else if (currentPrice > avgPrice) signal = "BUY";
+    else if (currentPrice < avgPrice * 0.998) signal = "STRONG SELL";
+    else if (currentPrice < avgPrice) signal = "SELL";
+
+    return { signal, currentPrice, movingAverage: parseFloat(avgPrice.toFixed(4)) };
+};
+
+const retailHistory = {};
+retailAssets.forEach(a => retailHistory[a.symbol] = Array(20).fill(a.price));
+
+let fakeMarket = retailAssets.map(a => ({ ...a, openPrice: a.price, change: "+0.00%" }));
+
 setInterval(() => {
     fakeMarket = fakeMarket.map(asset => {
         const movement = asset.price * (Math.random() * asset.volatility * 2 - asset.volatility);
-        return { ...asset, price: parseFloat((asset.price + movement).toFixed(4)) };
+        const newPrice = parseFloat((asset.price + movement).toFixed(4));
+        retailHistory[asset.symbol].shift();
+        retailHistory[asset.symbol].push(newPrice);
+        
+        const changePct = (((newPrice - asset.openPrice) / asset.openPrice) * 100).toFixed(2);
+        const changeStr = changePct >= 0 ? `+${changePct}%` : `${changePct}%`;
+
+        return { ...asset, price: newPrice, change: changeStr };
     });
 }, 3000);
 
@@ -272,6 +289,13 @@ app.post('/api/trade/execute', protect, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Trade failed." }); }
 });
 
+app.get('/api/ai/inbuilt/predict/:symbol', protect, (req, res) => {
+    if (!hasAccess(req)) return res.status(403).json({ error: "Payment required." });
+    const symbol = decodeURIComponent(req.params.symbol);
+    const prediction = calculateSignal(retailHistory[symbol]);
+    res.json({ source: "NN-FINTECH ALGOS", ...prediction });
+});
+
 app.post('/api/ai/openai/tutor', protect, async (req, res) => {
     if (!hasAccess(req)) return res.status(403).json({ error: "Retail License Required." });
     const { question } = req.body;
@@ -349,6 +373,36 @@ app.post('/api/payment/webhook', async (req, res) => {
 });
 
 // --- 9. GOD-MODE WATCHTOWER ---
+app.get('/api/admin/users', protect, requireGodMode, async (req, res) => {
+    try {
+        const users = await User.find().select('-password').sort({ _id: -1 });
+        res.json(users);
+    } catch (err) { res.status(500).json({ error: "Failed to fetch users." }); }
+});
+
+app.post('/api/admin/provision-b2b', protect, requireGodMode, async (req, res) => {
+    const { targetEmail, allowedDomain, plainTextPolygonKey } = req.body;
+    const user = await User.findOneAndUpdate(
+        { email: targetEmail },
+        { 
+            subscriptionTier: 'b2b_500',
+            subscriptionExpiry: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            b2bKey: "nn_api_" + crypto.randomBytes(32).toString('hex'),
+            allowedOrigin: allowedDomain,
+            clientPolygonKey: encryptKey(plainTextPolygonKey)
+        },
+        { new: true }
+    );
+    if (!user) return res.status(404).json({ error: "User not found." });
+    res.json({ message: "B2B Node Provisioned.", api_key: user.b2bKey });
+});
+
+app.post('/api/admin/ban', protect, requireGodMode, async (req, res) => {
+    const { targetEmail } = req.body;
+    await User.findOneAndUpdate({ email: targetEmail }, { isActive: false });
+    res.json({ message: `Access revoked for ${targetEmail}.` });
+});
+
 app.get('/api/admin/all-transactions', protect, requireGodMode, async (req, res) => {
     try {
         const feed = await User.aggregate([
