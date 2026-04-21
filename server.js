@@ -275,18 +275,35 @@ app.get('/api/market/stream', protect, (req, res) => {
 app.post('/api/trade/execute', protect, async (req, res) => {
     try {
         if (!hasAccess(req)) return res.status(403).json({ error: "License required." });
-        const { symbol, amount, side } = req.body;
+        
+        const { symbol, side } = req.body;
+        // Force amount to be a number to prevent math errors
+        const amount = Number(req.body.amount); 
+
+        if (isNaN(amount) || amount <= 0) return res.status(400).json({ error: "Invalid trade amount." });
         if (req.user.demoBalance < amount) return res.status(400).json({ error: "Insufficient Funds." });
 
         const win = Math.random() > 0.48;
-        const pnl = win ? (amount * 0.1) : -amount;
-        req.user.demoBalance += pnl;
+        // Ensure pnl is a strict number
+        const pnl = Number(win ? (amount * 0.1) : -amount); 
+        
+        req.user.demoBalance = Number(req.user.demoBalance + pnl);
         
         if (!req.user.transactions) req.user.transactions = [];
-        req.user.transactions.unshift({ type: `SIM_${side.toUpperCase()}_${symbol}`, amount: pnl, date: new Date() });
+        
+        // Push as a clean object with forced Number type
+        req.user.transactions.unshift({ 
+            type: `SIM_${side.toUpperCase()}_${symbol}`, 
+            amount: pnl, 
+            date: new Date() 
+        });
+
         await req.user.save();
         res.json({ newBalance: req.user.demoBalance });
-    } catch (err) { res.status(500).json({ error: "Trade failed." }); }
+    } catch (err) { 
+        console.error("Trade Error:", err);
+        res.status(500).json({ error: "Trade failed." }); 
+    }
 });
 
 app.get('/api/ai/inbuilt/predict/:symbol', protect, (req, res) => {
