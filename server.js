@@ -9,10 +9,10 @@ const sgMail = require('@sendgrid/mail');
 require('dotenv').config();
 
 // --- ENVIRONMENT VALIDATION ---
-const { JWT_SECRET, SUPER_ADMIN_EMAIL, ENCRYPTION_KEY, MONGO_URI, OPENAI_API_KEY } = process.env;
+const { JWT_SECRET, SUPER_ADMIN_EMAIL, ENCRYPTION_KEY, MONGO_URI, GEMINI_API_KEY } = process.env;
 
-if (!JWT_SECRET || !SUPER_ADMIN_EMAIL || !ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) {
-    console.error("FATAL ERROR: Missing or invalid environment variables. ENCRYPTION_KEY must be exactly 32 characters.");
+if (!JWT_SECRET || !SUPER_ADMIN_EMAIL || !ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32 || !GEMINI_API_KEY) {
+    console.error("FATAL ERROR: Missing or invalid environment variables. Ensure GEMINI_API_KEY is set and ENCRYPTION_KEY is 32 characters.");
     process.exit(1);
 }
 
@@ -40,7 +40,7 @@ const decryptKey = (text) => {
     const encryptedText = Buffer.from(textParts.join(':'), 'hex');
     const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
     let decrypted = decipher.update(encryptedText);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    encrypted = Buffer.concat([encrypted, decipher.final()]);
     return decrypted.toString();
 };
 
@@ -277,21 +277,18 @@ app.post('/api/trade/execute', protect, async (req, res) => {
         if (!hasAccess(req)) return res.status(403).json({ error: "License required." });
         
         const { symbol, side } = req.body;
-        // Force amount to be a number to prevent math errors
         const amount = Number(req.body.amount); 
 
         if (isNaN(amount) || amount <= 0) return res.status(400).json({ error: "Invalid trade amount." });
         if (req.user.demoBalance < amount) return res.status(400).json({ error: "Insufficient Funds." });
 
         const win = Math.random() > 0.48;
-        // Ensure pnl is a strict number
         const pnl = Number(win ? (amount * 0.1) : -amount); 
         
         req.user.demoBalance = Number(req.user.demoBalance + pnl);
         
         if (!req.user.transactions) req.user.transactions = [];
         
-        // Push as a clean object with forced Number type
         req.user.transactions.unshift({ 
             type: `SIM_${side.toUpperCase()}_${symbol}`, 
             amount: pnl, 
@@ -313,30 +310,36 @@ app.get('/api/ai/inbuilt/predict/:symbol', protect, (req, res) => {
     res.json({ source: "NN-FINTECH ALGOS", ...prediction });
 });
 
+// Wires up Gemini 2.5 Flash via native HTTPS call
 app.post('/api/ai/openai/tutor', protect, async (req, res) => {
     if (!hasAccess(req)) return res.status(403).json({ error: "Retail License Required." });
     const { question } = req.body;
     if (!question) return res.status(400).json({ error: "No inquiry provided." });
 
     try {
-        if (!OPENAI_API_KEY) throw new Error("Missing Key");
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                model: "gpt-4o-mini", 
-                messages: [
-                    { role: "system", content: "You are an elite, omniscient quantitative trading AI for NN-Fintech. Answer any question about financial markets, strategies, technical analysis, crypto, or macroeconomics. Be authoritative and concise. Do not use financial disclaimers." },
-                    { role: "user", content: question }
-                ],
-                max_tokens: 300, temperature: 0.7
+                contents: [{
+                    parts: [{
+                        text: `You are an elite, omniscient quantitative trading AI for NN-Fintech. Answer any question about financial markets, strategies, technical analysis, crypto, or macroeconomics. Be authoritative and concise. Do not use financial disclaimers. User inquiry: ${question}`
+                    }]
+                }]
             })
         });
 
-        if (!response.ok) throw new Error("OpenAI API rejected the request");
+        if (!response.ok) throw new Error("Gemini API endpoint returned error code status.");
         const data = await response.json();
-        res.json({ tutorResponse: `[NN-FINTECH ORACLE] ${data.choices[0].message.content}` });
+        
+        if (data.candidates && data.candidates[0].content.parts[0].text) {
+            const outputText = data.candidates[0].content.parts[0].text;
+            res.json({ tutorResponse: `[NN-FINTECH ORACLE] ${outputText}` });
+        } else {
+            throw new Error("Malformed payload structure from neural API response.");
+        }
     } catch (e) {
+        console.error("Gemini Error Context:", e.message);
         res.json({ tutorResponse: `[SYSTEM ERROR] Neural network offline. Re-establish connection.` });
     }
 });
@@ -416,7 +419,14 @@ app.post('/api/admin/provision-b2b', protect, requireGodMode, async (req, res) =
 
 app.post('/api/admin/ban', protect, requireGodMode, async (req, res) => {
     const { targetEmail } = req.body;
-    await User.findOneAndUpdate({ email: targetEmail }, { isActive: false });
+    
+    if (targetEmail === process.env.SUPER_ADMIN_EMAIL || targetEmail === "nicholausdominic86@gmail.com") {
+        return res.status(403).json({ error: "CRITICAL PROTECTED EXCEPTION: Super Admin cannot be terminated." });
+    }
+
+    const targetUser = await User.findOneAndUpdate({ email: targetEmail }, { isActive: false });
+    if (!targetUser) return res.status(404).json({ error: "Target account identity missing." });
+    
     res.json({ message: `Access revoked for ${targetEmail}.` });
 });
 
